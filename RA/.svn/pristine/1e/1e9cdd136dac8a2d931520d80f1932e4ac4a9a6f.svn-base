@@ -1,0 +1,379 @@
+From 3a722b93b6e6858c18d4ef03c96963c72cedd75e Mon Sep 17 00:00:00 2001
+From: Zhang Jie <zhangj@buptnet.edu.cn>
+Date: Sun, 2 Sep 2012 12:36:19 +0800
+Subject: [PATCH] Mod for RA new option support
+
+---
+ defaults.h  |   23 +++++++++++++++++++
+ gram.y      |   70 +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ interface.c |   11 +++++++++
+ radvd.c     |   10 ++++++++
+ radvd.h     |   16 +++++++++++++
+ scanner.l   |    7 ++++++
+ send.c      |   35 +++++++++++++++++++++++++++++
+ 7 files changed, 172 insertions(+), 0 deletions(-)
+
+diff --git a/defaults.h b/defaults.h
+index 89cd7f7..d027121 100644
+--- a/defaults.h
++++ b/defaults.h
+@@ -58,6 +58,11 @@
+ #define DFLT_DeprecatePrefixFlag	0
+ #define DFLT_DecrementLifetimesFlag	0
+ 
++/* Tele Option Initial Define */
++#define DFLT_AdvNatFlag		1
++#define DFLT_AdvNatLifetime		43200 /* seconds */
++#define DFLT_RemoveNatFlag		1
++
+ /* Each route has an associated: */
+ #define DFLT_AdvRouteLifetime(iface)	(3 * (iface)->MaxRtrAdvInterval)
+ 
+@@ -152,6 +157,11 @@
+ #undef ND_OPT_ROUTE_INFORMATION
+ #define  ND_OPT_ROUTE_INFORMATION	24
+ 
++/* New custom type */
++#ifndef ND_OPT_NAT_INFORMATION
++#define ND_OPT_NAT_INFORMATION	200
++#endif
++
+ /* XXX: some libc's like KAME already had nd_opt_route_info! */
+ struct nd_opt_route_info_local     /* route information */
+   {
+@@ -163,6 +173,19 @@ struct nd_opt_route_info_local     /* route information */
+     struct in6_addr  nd_opt_ri_prefix;
+   };
+ 
++/* Custom NAT info */
++struct nd_opt_nat_info_local     /* NAT Data Structure */
++  {
++    uint8_t   nd_opt_nat_type;
++    uint8_t   nd_opt_nat_len;
++    uint8_t   nd_opt_nat_prefix_len;
++    uint8_t   nd_opt_nat_flags_reserved;
++    uint32_t  nd_opt_nat_lifetime;
++    uint32_t  nd_opt_nat_flags_reserved2;
++    uint32_t  nd_opt_nat_addr;
++    struct in6_addr  nd_opt_nat_prefix;
++  };
++
+ /* the reserved field is 8 bits and we're interested of the middle two: 000xx000 */
+ #define ND_OPT_RI_PRF_SHIFT	3
+ #define ND_OPT_RI_PRF_MASK	(3 << ND_OPT_RI_PRF_SHIFT) /* 00011000 = 0x18 */
+diff --git a/gram.y b/gram.y
+index 43f3c29..0417206 100644
+--- a/gram.y
++++ b/gram.y
+@@ -21,6 +21,7 @@
+ extern struct Interface *IfaceList;
+ struct Interface *iface = NULL;
+ struct AdvPrefix *prefix = NULL;
++struct AdvNat  *nat = NULL;
+ struct AdvRoute *route = NULL;
+ struct AdvRDNSS *rdnss = NULL;
+ struct AdvDNSSL *dnssl = NULL;
+@@ -62,6 +63,7 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ 
+ %token		T_INTERFACE
+ %token		T_PREFIX
++%token		T_NAT
+ %token		T_ROUTE
+ %token		T_RDNSS
+ %token		T_DNSSL
+@@ -73,6 +75,7 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ %token	<dec>	DECIMAL
+ %token	<num>	SWITCH
+ %token	<addr>	IPV6ADDR
++%token	<addr4>	IPV4ADDR
+ %token 		INFINITY
+ 
+ %token		T_IgnoreIfMissing
+@@ -109,6 +112,11 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ %token		T_HomeAgentPreference
+ %token		T_HomeAgentLifetime
+ 
++%token		T_AdvNatFlag
++%token		T_AdvNatLifetime
++%token		T_RemoveNatFlag
++%token		T_NatAddr
++
+ %token		T_AdvRoutePreference
+ %token		T_AdvRouteLifetime
+ %token		T_RemoveRoute
+@@ -128,6 +136,7 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ %type	<str>	name
+ %type	<pinfo> prefixdef
+ %type	<ainfo> clientslist v6addrlist
++%type	<ninfo>	natdef
+ %type	<rinfo>	routedef
+ %type	<rdnssinfo> rdnssdef
+ %type	<dnsslinfo> dnssldef
+@@ -140,6 +149,7 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ 	struct in6_addr		*addr;
+ 	char			*str;
+ 	struct AdvPrefix	*pinfo;
++	struct AdvNat		*ninfo;
+ 	struct AdvRoute		*rinfo;
+ 	struct AdvRDNSS		*rdnssinfo;
+ 	struct AdvDNSSL		*dnsslinfo;
+@@ -228,6 +238,7 @@ ifaceparams :
+ ifaceparam 	: ifaceval
+ 		| prefixdef 	{ ADD_TO_LL(struct AdvPrefix, AdvPrefixList, $1); }
+ 		| clientslist 	{ ADD_TO_LL(struct Clients, ClientList, $1); }
++		| natdef 	 	{ ADD_TO_LL(struct AdvNat, AdvNatList, $1); }
+ 		| routedef 	{ ADD_TO_LL(struct AdvRoute, AdvRouteList, $1); }
+ 		| rdnssdef 	{ ADD_TO_LL(struct AdvRDNSS, AdvRDNSSList, $1); }
+ 		| dnssldef 	{ ADD_TO_LL(struct AdvDNSSL, AdvDNSSLList, $1); }
+@@ -726,6 +737,62 @@ routeparms	: T_AdvRoutePreference SIGNEDNUMBER ';'
+ 		}
+ 		;
+ 
++natdef	: nathead '{' optional_natplist '}' ';'
++		{
++			$$ = nat;
++			nat = NULL;
++		}
++		;
++
++nathead	: T_NAT IPV6ADDR '/' NUMBER
++		{
++			nat = malloc(sizeof(struct AdvNat));
++
++			if (nat == NULL) {
++				flog(LOG_CRIT, "malloc failed: %s", strerror(errno));
++				ABORT;
++			}
++
++			nat_init_defaults(nat);
++
++			if ($4 > MAX_PrefixLen)
++			{
++				flog(LOG_ERR, "invalid NAT prefix length in %s, line %d", conf_file, num_lines);
++				ABORT;
++			}
++
++			nat->PrefixLen = $4;
++
++			memcpy(&nat->Prefix, $2, sizeof(struct in6_addr));
++		}
++		;
++
++optional_natplist: /* empty */
++		| natplist
++		;
++
++natplist	:natplist natparms
++		| natparms
++		;
++
++natparms	: T_AdvNatFlag SWITCH ';'
++		{
++			nat->AdvNatFlag = $2;
++		}
++		| T_AdvNatLifetime number_or_infinity ';'
++		{
++			nat->AdvNatLifetime = $2;
++		}
++		| T_RemoveNatFlag SWITCH ';'
++		{
++			nat->RemoveNatFlag = $2;
++		}
++		| T_NatAddr IPV4ADDR ';'
++		{
++			nat->NatAddr = inet_addr("$2");
++		}
++		;
++		
+ rdnssdef	: rdnsshead '{' optional_rdnssplist '}' ';'
+ 		{
+ 			$$ = rdnss;
+@@ -962,6 +1029,9 @@ void cleanup(void)
+ 	if (prefix)
+ 		free(prefix);
+ 
++	if (nat)
++		free(nat);
++
+ 	if (route)
+ 		free(route);
+ 
+diff --git a/interface.c b/interface.c
+index d17267e..7ff7c9f 100644
+--- a/interface.c
++++ b/interface.c
+@@ -66,6 +66,17 @@ prefix_init_defaults(struct AdvPrefix *prefix)
+ }
+ 
+ void
++nat_init_defaults(struct AdvNat *nat)
++{
++	memset(nat, 0, sizeof(struct AdvNat));
++
++	nat->AdvNatFlag = DFLT_AdvNatFlag;
++	nat->AdvNatLifetime = DFLT_AdvNatLifetime;
++	nat->RemoveNatFlag = DFLT_RemoveNatFlag;
++	nat->NatAddr = inet_addr("22.22.11.11");
++}
++
++void
+ route_init_defaults(struct AdvRoute *route, struct Interface *iface)
+ {
+ 	memset(route, 0, sizeof(struct AdvRoute));
+diff --git a/radvd.c b/radvd.c
+index 111c21c..48c3132 100644
+--- a/radvd.c
++++ b/radvd.c
+@@ -576,6 +576,7 @@ void reload_config(void)
+ 	{
+ 		struct Interface *next_iface = iface->next;
+ 		struct AdvPrefix *prefix;
++		struct AdvNat   *nat;
+ 		struct AdvRoute *route;
+ 		struct AdvRDNSS *rdnss;
+ 		struct AdvDNSSL *dnssl;
+@@ -600,6 +601,15 @@ void reload_config(void)
+ 			route = next_route;
+ 		}
+ 
++		nat = iface->AdvNatList;
++		while (nat)
++		{
++			struct AdvNat *next_nat = nat->next;
++
++			free(nat);
++			nat = next_nat;
++		}
++
+ 		rdnss = iface->AdvRDNSSList;
+ 		while (rdnss)
+ 		{
+diff --git a/radvd.h b/radvd.h
+index d1304f4..5d38668 100644
+--- a/radvd.h
++++ b/radvd.h
+@@ -77,6 +77,7 @@ struct Interface {
+ 	int			AdvMobRtrSupportFlag;
+ 
+ 	struct AdvPrefix	*AdvPrefixList;
++	struct AdvNat     *AdvNatList;
+ 	struct AdvRoute		*AdvRouteList;
+ 	struct AdvRDNSS		*AdvRDNSSList;
+ 	struct AdvDNSSL		*AdvDNSSLList;
+@@ -123,6 +124,20 @@ struct AdvPrefix {
+ 	struct AdvPrefix	*next;
+ };
+ 
++/* Custom Option for ICMPv6 RS&RA */
++
++struct AdvNat {
++	struct in6_addr		Prefix;
++	uint8_t			PrefixLen;
++
++	int			AdvNatFlag;
++	uint32_t		AdvNatLifetime;
++	int			RemoveNatFlag;
++	uint32_t         NatAddr;
++
++	struct AdvNat		*next;
++};
++
+ /* More-Specific Routes extensions */
+ 
+ struct AdvRoute {
+@@ -210,6 +225,7 @@ int set_interface_retranstimer(const char *, uint32_t);
+ /* interface.c */
+ void iface_init_defaults(struct Interface *);
+ void prefix_init_defaults(struct AdvPrefix *);
++void nat_init_defaults(struct AdvNat *);
+ void route_init_defaults(struct AdvRoute *, struct Interface *);
+ void rdnss_init_defaults(struct AdvRDNSS *, struct Interface *);
+ void dnssl_init_defaults(struct AdvDNSSL *, struct Interface *);
+diff --git a/scanner.l b/scanner.l
+index c2f68cd..2624f33 100644
+--- a/scanner.l
++++ b/scanner.l
+@@ -35,6 +35,7 @@ addr1		{hexdigit}{1,4}":"({hexdigit}{1,4}":")*(":"{hexdigit}{1,4})+
+ addr2		{hexdigit}{1,4}(":"{hexdigit}{1,4})*"::"
+ addr3		({hexdigit}{1,4}":"){7}{hexdigit}{1,4}
+ addr		({addr1}|{addr2}|{addr3}|"::")
++addr4		({number}"."{number}"."{number}"."{number})
+ whitespace	([ \t])+
+ string		[a-zA-Z0-9`~!@#$%\^&*()_\-+=:\[\]<>,\.?\\]+
+ %%
+@@ -45,6 +46,7 @@ string		[a-zA-Z0-9`~!@#$%\^&*()_\-+=:\[\]<>,\.?\\]+
+ 
+ interface		{ return T_INTERFACE; }
+ prefix			{ return T_PREFIX; }
++nat			{ return T_NAT; }
+ route			{ return T_ROUTE; }
+ RDNSS			{ return T_RDNSS; }
+ DNSSL			{ return T_DNSSL; }
+@@ -83,6 +85,11 @@ Base6to4Interface	{ return T_Base6to4Interface; }
+ HomeAgentPreference	{ return T_HomeAgentPreference; }
+ HomeAgentLifetime	{ return T_HomeAgentLifetime; }
+ 
++AdvNatFlag	{ return T_AdvNatFlag; }
++AdvNatLifetime	{ return T_AdvNatLifetime; }
++RemoveNatFlag	{ return T_RemoveNatFlag; }
++NatAddr	{ return T_NatAddr; }
++
+ AdvRoutePreference	{ return T_AdvRoutePreference; }
+ AdvRouteLifetime	{ return T_AdvRouteLifetime; }
+ RemoveRoute		{ return T_RemoveRoute; }
+diff --git a/send.c b/send.c
+index 9e6a29c..1db3b4b 100644
+--- a/send.c
++++ b/send.c
+@@ -125,6 +125,7 @@ send_ra(struct Interface *iface, struct in6_addr *dest)
+ 	struct AdvRoute *route;
+ 	struct AdvRDNSS *rdnss;
+ 	struct AdvDNSSL *dnssl;
++	struct AdvNat *nat;
+ 	struct timeval time_now;
+ 	time_t secs_since_last_ra;
+ 
+@@ -268,6 +269,40 @@ send_ra(struct Interface *iface, struct in6_addr *dest)
+ 		prefix = prefix->next;
+ 	}
+ 
++	nat = iface->AdvNatList;
++
++	/*
++	 *	add Nat options
++	 */
++
++	while(nat)
++	{
++		struct nd_opt_nat_info_local *ninfo;
++
++		ninfo = (struct nd_opt_nat_info_local *) (buff + len);
++
++		send_ra_inc_len(&len, sizeof(*ninfo));
++
++		ninfo->nd_opt_nat_type	     = ND_OPT_NAT_INFORMATION;
++		/* New custom items */
++		ninfo->nd_opt_nat_len	     = 4;
++		ninfo->nd_opt_nat_prefix_len  = nat->PrefixLen;
++		ninfo->nd_opt_nat_addr = nat->NatAddr;
++
++		ninfo->nd_opt_nat_flags_reserved  =
++			(nat->AdvNatFlag << ND_OPT_RI_PRF_SHIFT) & ND_OPT_RI_PRF_MASK;
++		if (iface->cease_adv && nat->RemoveNatFlag) {
++			ninfo->nd_opt_nat_lifetime	= 0;
++		} else {
++			ninfo->nd_opt_nat_lifetime	= htonl(nat->AdvNatLifetime);
++		}
++
++		memcpy(&ninfo->nd_opt_nat_prefix, &nat->Prefix,
++		       sizeof(struct in6_addr));
++
++		nat = nat->next;
++	}
++
+ 	route = iface->AdvRouteList;
+ 
+ 	/*
+-- 
+1.7.9.msysgit.0
+

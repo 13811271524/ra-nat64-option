@@ -1,0 +1,334 @@
+diff --git a/defaults.h b/defaults.h
+index 89cd7f7..d2e2b8d 100644
+--- a/defaults.h
++++ b/defaults.h
+@@ -58,6 +58,11 @@
+ #define DFLT_DeprecatePrefixFlag	0
+ #define DFLT_DecrementLifetimesFlag	0
+ 
++/* Tele Option Initial Define */
++#define DFLT_AdvTeleFlag		1
++#define DFLT_AdvTeleLifetime		43200 /* seconds */
++#define DFLT_RemoveTeleFlag		1
++
+ /* Each route has an associated: */
+ #define DFLT_AdvRouteLifetime(iface)	(3 * (iface)->MaxRtrAdvInterval)
+ 
+@@ -152,6 +157,11 @@
+ #undef ND_OPT_ROUTE_INFORMATION
+ #define  ND_OPT_ROUTE_INFORMATION	24
+ 
++/* New custom type */
++#ifndef ND_OPT_TELE_INFORMATION
++#define ND_OPT_TELE_INFORMATION	200
++#endif
++
+ /* XXX: some libc's like KAME already had nd_opt_route_info! */
+ struct nd_opt_route_info_local     /* route information */
+   {
+@@ -163,6 +173,17 @@ struct nd_opt_route_info_local     /* route information */
+     struct in6_addr  nd_opt_ri_prefix;
+   };
+ 
++/* Custom tele info */
++struct nd_opt_tele_info_local     /* tele information */
++  {
++    uint8_t   nd_opt_tl_type;
++    uint8_t   nd_opt_tl_len;
++    uint8_t   nd_opt_tl_prefix_len;
++    uint8_t   nd_opt_tl_flags_reserved;
++    uint32_t  nd_opt_tl_lifetime;
++    struct in6_addr  nd_opt_tl_prefix;
++  };
++
+ /* the reserved field is 8 bits and we're interested of the middle two: 000xx000 */
+ #define ND_OPT_RI_PRF_SHIFT	3
+ #define ND_OPT_RI_PRF_MASK	(3 << ND_OPT_RI_PRF_SHIFT) /* 00011000 = 0x18 */
+diff --git a/gram.y b/gram.y
+index 43f3c29..ed8589d 100644
+--- a/gram.y
++++ b/gram.y
+@@ -21,6 +21,7 @@
+ extern struct Interface *IfaceList;
+ struct Interface *iface = NULL;
+ struct AdvPrefix *prefix = NULL;
++struct AdvTele  *tele = NULL;
+ struct AdvRoute *route = NULL;
+ struct AdvRDNSS *rdnss = NULL;
+ struct AdvDNSSL *dnssl = NULL;
+@@ -62,6 +63,7 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ 
+ %token		T_INTERFACE
+ %token		T_PREFIX
++%token		T_TELE
+ %token		T_ROUTE
+ %token		T_RDNSS
+ %token		T_DNSSL
+@@ -109,6 +111,10 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ %token		T_HomeAgentPreference
+ %token		T_HomeAgentLifetime
+ 
++%token		T_AdvTeleFlag
++%token		T_AdvTeleLifetime
++%token		T_RemoveTeleFlag
++
+ %token		T_AdvRoutePreference
+ %token		T_AdvRouteLifetime
+ %token		T_RemoveRoute
+@@ -128,6 +134,7 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ %type	<str>	name
+ %type	<pinfo> prefixdef
+ %type	<ainfo> clientslist v6addrlist
++%type	<tinfo>	teledef
+ %type	<rinfo>	routedef
+ %type	<rdnssinfo> rdnssdef
+ %type	<dnsslinfo> dnssldef
+@@ -140,6 +147,7 @@ static struct in6_addr get_prefix6(struct in6_addr const *addr, struct in6_addr
+ 	struct in6_addr		*addr;
+ 	char			*str;
+ 	struct AdvPrefix	*pinfo;
++	struct AdvTele		*tinfo;
+ 	struct AdvRoute		*rinfo;
+ 	struct AdvRDNSS		*rdnssinfo;
+ 	struct AdvDNSSL		*dnsslinfo;
+@@ -228,6 +236,7 @@ ifaceparams :
+ ifaceparam 	: ifaceval
+ 		| prefixdef 	{ ADD_TO_LL(struct AdvPrefix, AdvPrefixList, $1); }
+ 		| clientslist 	{ ADD_TO_LL(struct Clients, ClientList, $1); }
++		| teledef 	 	{ ADD_TO_LL(struct AdvTele, AdvTeleList, $1); }
+ 		| routedef 	{ ADD_TO_LL(struct AdvRoute, AdvRouteList, $1); }
+ 		| rdnssdef 	{ ADD_TO_LL(struct AdvRDNSS, AdvRDNSSList, $1); }
+ 		| dnssldef 	{ ADD_TO_LL(struct AdvDNSSL, AdvDNSSLList, $1); }
+@@ -726,6 +735,58 @@ routeparms	: T_AdvRoutePreference SIGNEDNUMBER ';'
+ 		}
+ 		;
+ 
++teledef	: telehead '{' optional_teleplist '}' ';'
++		{
++			$$ = tele;
++			tele = NULL;
++		}
++		;
++
++telehead	: T_TELE IPV6ADDR '/' NUMBER
++		{
++			tele = malloc(sizeof(struct AdvTele));
++
++			if (tele == NULL) {
++				flog(LOG_CRIT, "malloc failed: %s", strerror(errno));
++				ABORT;
++			}
++
++			tele_init_defaults(tele);
++
++			if ($4 > MAX_PrefixLen)
++			{
++				flog(LOG_ERR, "invalid tele prefix length in %s, line %d", conf_file, num_lines);
++				ABORT;
++			}
++
++			tele->PrefixLen = $4;
++
++			memcpy(&tele->Prefix, $2, sizeof(struct in6_addr));
++		}
++		;
++
++optional_teleplist: /* empty */
++		| teleplist
++		;
++
++teleplist	: teleplist teleparms
++		| teleparms
++		;
++
++teleparms	: T_AdvTeleFlag SWITCH ';'
++		{
++			tele->AdvTeleFlag = $2;
++		}
++		| T_AdvTeleLifetime number_or_infinity ';'
++		{
++			tele->AdvTeleLifetime = $2;
++		}
++		| T_RemoveTeleFlag SWITCH ';'
++		{
++			tele->RemoveTeleFlag = $2;
++		}
++		;
++		
+ rdnssdef	: rdnsshead '{' optional_rdnssplist '}' ';'
+ 		{
+ 			$$ = rdnss;
+@@ -962,6 +1023,9 @@ void cleanup(void)
+ 	if (prefix)
+ 		free(prefix);
+ 
++	if (tele)
++		free(tele);
++
+ 	if (route)
+ 		free(route);
+ 
+diff --git a/interface.c b/interface.c
+index d17267e..32649c8 100644
+--- a/interface.c
++++ b/interface.c
+@@ -66,6 +66,16 @@ prefix_init_defaults(struct AdvPrefix *prefix)
+ }
+ 
+ void
++tele_init_defaults(struct AdvTele *tele)
++{
++	memset(tele, 0, sizeof(struct AdvTele));
++
++	tele->AdvTeleFlag = DFLT_AdvTeleFlag;
++	tele->AdvTeleLifetime = DFLT_AdvTeleLifetime;
++	tele->RemoveTeleFlag = DFLT_RemoveTeleFlag;
++}
++
++void
+ route_init_defaults(struct AdvRoute *route, struct Interface *iface)
+ {
+ 	memset(route, 0, sizeof(struct AdvRoute));
+diff --git a/radvd.c b/radvd.c
+index 111c21c..2886b25 100644
+--- a/radvd.c
++++ b/radvd.c
+@@ -576,6 +576,7 @@ void reload_config(void)
+ 	{
+ 		struct Interface *next_iface = iface->next;
+ 		struct AdvPrefix *prefix;
++		struct AdvTele   *tele;
+ 		struct AdvRoute *route;
+ 		struct AdvRDNSS *rdnss;
+ 		struct AdvDNSSL *dnssl;
+@@ -600,6 +601,15 @@ void reload_config(void)
+ 			route = next_route;
+ 		}
+ 
++		tele = iface->AdvTeleList;
++		while (tele)
++		{
++			struct AdvTele *next_tele = tele->next;
++
++			free(tele);
++			tele = next_tele;
++		}
++
+ 		rdnss = iface->AdvRDNSSList;
+ 		while (rdnss)
+ 		{
+diff --git a/radvd.h b/radvd.h
+index d1304f4..ba5bc7c 100644
+--- a/radvd.h
++++ b/radvd.h
+@@ -77,6 +77,7 @@ struct Interface {
+ 	int			AdvMobRtrSupportFlag;
+ 
+ 	struct AdvPrefix	*AdvPrefixList;
++	struct AdvTele     *AdvTeleList;
+ 	struct AdvRoute		*AdvRouteList;
+ 	struct AdvRDNSS		*AdvRDNSSList;
+ 	struct AdvDNSSL		*AdvDNSSLList;
+@@ -123,6 +124,19 @@ struct AdvPrefix {
+ 	struct AdvPrefix	*next;
+ };
+ 
++/* Custom Option for ICMPv6 RS&RA */
++
++struct AdvTele {
++	struct in6_addr		Prefix;
++	uint8_t			PrefixLen;
++
++	int			AdvTeleFlag;
++	uint32_t		AdvTeleLifetime;
++	int			RemoveTeleFlag;
++
++	struct AdvTele		*next;
++};
++
+ /* More-Specific Routes extensions */
+ 
+ struct AdvRoute {
+@@ -210,6 +224,7 @@ int set_interface_retranstimer(const char *, uint32_t);
+ /* interface.c */
+ void iface_init_defaults(struct Interface *);
+ void prefix_init_defaults(struct AdvPrefix *);
++void tele_init_defaults(struct AdvTele *);
+ void route_init_defaults(struct AdvRoute *, struct Interface *);
+ void rdnss_init_defaults(struct AdvRDNSS *, struct Interface *);
+ void dnssl_init_defaults(struct AdvDNSSL *, struct Interface *);
+diff --git a/scanner.l b/scanner.l
+index c2f68cd..fa07364 100644
+--- a/scanner.l
++++ b/scanner.l
+@@ -45,6 +45,7 @@ string		[a-zA-Z0-9`~!@#$%\^&*()_\-+=:\[\]<>,\.?\\]+
+ 
+ interface		{ return T_INTERFACE; }
+ prefix			{ return T_PREFIX; }
++tele			{ return T_TELE; }
+ route			{ return T_ROUTE; }
+ RDNSS			{ return T_RDNSS; }
+ DNSSL			{ return T_DNSSL; }
+@@ -83,6 +84,10 @@ Base6to4Interface	{ return T_Base6to4Interface; }
+ HomeAgentPreference	{ return T_HomeAgentPreference; }
+ HomeAgentLifetime	{ return T_HomeAgentLifetime; }
+ 
++AdvTeleFlag	{ return T_AdvTeleFlag; }
++AdvTeleLifetime	{ return T_AdvTeleLifetime; }
++RemoveTeleFlag	{ return T_RemoveTeleFlag; }
++
+ AdvRoutePreference	{ return T_AdvRoutePreference; }
+ AdvRouteLifetime	{ return T_AdvRouteLifetime; }
+ RemoveRoute		{ return T_RemoveRoute; }
+diff --git a/send.c b/send.c
+index 9e6a29c..afc3ab2 100644
+--- a/send.c
++++ b/send.c
+@@ -125,6 +125,7 @@ send_ra(struct Interface *iface, struct in6_addr *dest)
+ 	struct AdvRoute *route;
+ 	struct AdvRDNSS *rdnss;
+ 	struct AdvDNSSL *dnssl;
++	struct AdvTele *tele;
+ 	struct timeval time_now;
+ 	time_t secs_since_last_ra;
+ 
+@@ -268,6 +269,39 @@ send_ra(struct Interface *iface, struct in6_addr *dest)
+ 		prefix = prefix->next;
+ 	}
+ 
++	tele = iface->AdvTeleList;
++
++	/*
++	 *	add Tele options
++	 */
++
++	while(tele)
++	{
++		struct nd_opt_tele_info_local *tinfo;
++
++		tinfo = (struct nd_opt_tele_info_local *) (buff + len);
++
++		send_ra_inc_len(&len, sizeof(*tinfo));
++
++		tinfo->nd_opt_tl_type	     = ND_OPT_TELE_INFORMATION;
++		/* New custom items */
++		tinfo->nd_opt_tl_len	     = 3;
++		tinfo->nd_opt_tl_prefix_len  = tele->PrefixLen;
++
++		tinfo->nd_opt_tl_flags_reserved  =
++			(tele->AdvTeleFlag << ND_OPT_RI_PRF_SHIFT) & ND_OPT_RI_PRF_MASK;
++		if (iface->cease_adv && tele->RemoveTeleFlag) {
++			tinfo->nd_opt_tl_lifetime	= 0;
++		} else {
++			tinfo->nd_opt_tl_lifetime	= htonl(tele->AdvTeleLifetime);
++		}
++
++		memcpy(&tinfo->nd_opt_tl_prefix, &tele->Prefix,
++		       sizeof(struct in6_addr));
++
++		tele = tele->next;
++	}
++
+ 	route = iface->AdvRouteList;
+ 
+ 	/*

@@ -1,0 +1,39 @@
+From 24edc4a0bb7b51ace327a662ca6ad4e6d250464f Mon Sep 17 00:00:00 2001
+From: zhj <zj262144@163.com>
+Date: Fri, 11 May 2012 13:49:06 +0800
+Subject: [PATCH] Add process new option (Part 1)
+
+---
+ include/net/ndisc.h |    1 +
+ net/ipv6/ndisc.c    |    3 +++
+ 2 files changed, 4 insertions(+), 0 deletions(-)
+
+diff --git a/include/net/ndisc.h b/include/net/ndisc.h
+index f76f22d..724a481 100644
+--- a/include/net/ndisc.h
++++ b/include/net/ndisc.h
+@@ -34,6 +34,7 @@ enum {
+ 	__ND_OPT_ARRAY_MAX,
+ 	ND_OPT_ROUTE_INFO = 24,		/* RFC4191 */
+ 	ND_OPT_RDNSS = 25,		/* RFC5006 */
++	ND_OPT_TELE = 200,		/* Custom */		
+ 	__ND_OPT_MAX
+ };
+ 
+diff --git a/net/ipv6/ndisc.c b/net/ipv6/ndisc.c
+index 2efef52..94d93b3 100644
+--- a/net/ipv6/ndisc.c
++++ b/net/ipv6/ndisc.c
+@@ -281,6 +281,9 @@ static struct ndisc_options *ndisc_parse_options(u8 *opt, int opt_len,
+ 			if (!ndopts->nd_opt_array[nd_opt->nd_opt_type])
+ 				ndopts->nd_opt_array[nd_opt->nd_opt_type] = nd_opt;
+ 			break;
++		case ND_OPT_TELE:
++			ndopts->nd_opts_ri_end = nd_opt;
++			break;
+ #ifdef CONFIG_IPV6_ROUTE_INFO
+ 		case ND_OPT_ROUTE_INFO:
+ 			ndopts->nd_opts_ri_end = nd_opt;
+-- 
+1.7.9.msysgit.0
+
